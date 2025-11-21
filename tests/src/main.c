@@ -11,10 +11,10 @@ int main()
     int num_of_words=0;
     char* token;
     int i;
-    int a=1;
-    int b=3;
-    printf("a+b= %d",a+b);
-    
+    int a=4;
+    int c=7;
+    printf("c-a= %d", c-a);
+
     while(1)
     {
         printf("hw1shell$ ");
@@ -23,7 +23,7 @@ int main()
             break;
         else
         {
-           num_of_words=0;
+           num_of_words=1;
            text[strcspn(text, "\n")]= '\0';
            token = strtok(text, " ");
            while (token != NULL)
