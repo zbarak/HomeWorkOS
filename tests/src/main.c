@@ -11,9 +11,6 @@ int main()
     int num_of_words=0;
     char* token;
     int i;
-    int a=4;
-    int c=7;
-    printf("c-a= %d", c-a);
 
     while(1)
     {
