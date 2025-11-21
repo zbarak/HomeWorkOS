@@ -11,7 +11,10 @@ int main()
     int num_of_words=0;
     char* token;
     int i;
-
+    int a=1;
+    int b=3;
+    printf("a+b= %d",a+b);
+    
     while(1)
     {
         printf("hw1shell$ ");
