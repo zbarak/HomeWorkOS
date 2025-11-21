@@ -20,7 +20,7 @@ int main()
             break;
         else
         {
-           num_of_words=0;
+           num_of_words=1;
            text[strcspn(text, "\n")]= '\0';
            token = strtok(text, " ");
            while (token != NULL)
