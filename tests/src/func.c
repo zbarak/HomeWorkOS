@@ -1,15 +1,10 @@
 #include "../header/func.h"
 
-void shrag()
-{
-    printf("Shrags.\n");
-}
-
 // A helper function to print errors according to Guideline 13.
 void report_syscall_error(const char *syscall_name) 
 {
-    // The format required: hwlshell: %s failed, errno is %d
-    fprintf(stderr, "hwlshell: %s failed, errno is\n", syscall_name);
+    // The format required: hw1shell: %s failed, errno is %d
+    fprintf(stderr, "hw1shell: %s failed, errno is %d\n", syscall_name, errno);
 }
 
 
@@ -49,7 +44,7 @@ int parse_command(char *line, Command *cmd)
 
     // 3. Handle tokenization errors (too many parameters, Guideline 14)
     if (word_count > WORDSIZE) {
-        fprintf(stderr, "hwlshell: command has too many parameters (max %d)\n", WORDSIZE);
+        fprintf(stderr, "hw1shell: command has too many parameters (max %d)\n", WORDSIZE);
         return -1;
     }
 
@@ -106,7 +101,7 @@ void handle_cd(char **args)
         // - "cd dir1 dir2" (args[2] is not NULL)
 
         // Error message required by Guideline 3
-        fprintf(stderr, "hwlshell: invalid command\n");
+        fprintf(stderr, "hw1shell: invalid command\n");
         return;
     }
 
@@ -121,7 +116,7 @@ void handle_cd(char **args)
         report_syscall_error("chdir");
 
         // A failed chdir() due to a non-existent directory is essentially an invalid/unexecutable command.
-        fprintf(stderr, "hwlshell: invalid command\n");
+        fprintf(stderr, "hw1shell: invalid command\n");
     }
 
     // If chdir is successful, it changes the working directory, and the function simply returns.
@@ -131,11 +126,115 @@ void handle_cd(char **args)
 void handle_exit()
 {
 }
-void handle_jobs()
+
+void handle_jobs(Job jobs[]) 
 {
+    for(int i = 0; i < MAX_BG; i++){
+        if(jobs[i].in_use){
+            printf("%d\t%s\n", jobs[i].pid, jobs[i].command);
+        }
+    }
 }
 
-void execute_external_command(Command user_cmd, char command_string_for_jobs)
+void execute_external_command(Command *user_cmd, char *command_string_for_jobs, Job jobs[])
 {
+    if((user_cmd->count == 0) || (user_cmd->args[0] == NULL)) //Make sure there is actual proper command to execute
+        return;
 
+    int is_bg = user_cmd->is_background;
+    if(is_bg){                              //Check if the command is background, and then check if we have free space for it (MAX = 4)
+        int running_bg = 0;
+        for(int i = 0; i < MAX_BG; i++){
+            if(jobs[i].in_use){
+                running_bg++;
+            }
+        }
+    
+
+    if(running_bg >= MAX_BG){ //Too many background jobs
+        fprintf(stderr, "hw1shell: too many background commands running\n");
+        return;
+        }
+    }
+    pid_t pid = fork();  //create a new process to actually perform the external command on the child process.
+
+    if(pid < 0){
+        report_syscall_error("fork"); //fork() failed: no child was created, report the issue(?)
+        fprintf(stderr, "hw1shell: invalid command\n"); //print the errno code?
+        return;
+    }
+
+    if(pid == 0){
+        //=============================
+        //  This is the child process
+        //=============================
+        execvp(user_cmd->args[0], user_cmd->args); //if all went good we never return
+        report_syscall_error("execvp");             //if we did continue, that means execvp failed
+        fprintf(stderr, "hw1shell: invalid command\n");//So we report it and exit <----------------------------- FIX REPORTING LATER
+        exit(1);
+    }
+
+    else {
+        //=============================
+        //  This is the parent process
+        //=============================
+        
+        if(is_bg){                  //Find a free spot in jobs[], as this is a background command
+            int slot = -1;
+            for(int i = 0; i< MAX_BG; i++){
+                if(!jobs[i].in_use){
+                    slot = i;
+                    break;
+                }
+            }
+        
+            if(slot == -1){ //We already checked but just to make sure
+                fprintf(stderr, "hw1shell: too many background commands running\n");
+                return;
+            }
+
+            jobs[slot].pid = pid;
+            jobs[slot].in_use = 1;
+            //Store the original command line (with &)
+            strncpy(jobs[slot].command, command_string_for_jobs, TEXTSIZE - 1);
+            jobs[slot].command[TEXTSIZE - 1] = '\0';
+
+            printf("hw1shell: pid %d started\n", pid);
+        }
+        else {
+        int status;
+        if(waitpid(pid, &status, 0) < 0) { //If all worked we return with value > 0
+            // we returned, waitpid failed
+            report_syscall_error("waitpid");
+            fprintf(stderr, "hw1shell: invalid command\n");
+            }
+        }
+    }
+}
+
+void reap_background_jobs(Job jobs[]){
+    int status;
+    //Go over every background job slot:
+    for(int i = 0; i < MAX_BG; i++){
+        if(jobs[i].in_use){
+            pid_t ret = waitpid(jobs[i].pid, &status, WNOHANG); //Check if this child process is finished without blocking it
+            if (ret > 0){
+                printf("hw1shell: pid %d finished\n", jobs[i].pid); //Print which child with which pid has finished.
+                //free up its slot
+                jobs[i].in_use = 0;
+                jobs[i].pid = 0;
+                jobs[i].command[0] = '\0';
+            }
+            else if (ret < 0) {
+                //Error while checking this child
+                report_syscall_error("waitpid");
+                fprintf(stderr, "hw1shell: invalid command\n");
+                //Also free the slots
+                jobs[i].in_use = 0;
+                jobs[i].pid = 0;
+                jobs[i].command[0] = '\0';
+            }
+            //ret == 0 -> child is still running, do nothing
+        }
+    }
 }
