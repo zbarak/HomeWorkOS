@@ -6,9 +6,13 @@ int main()
     Command user_cmd;
     char command_string_for_jobs[TEXTSIZE];
     Job jobs[MAX_BG] = {0};
+    char cwd[1024]; // Buffer to store the current working directory
     while(1)
-    {   
-        printf("hw1shell$ ");
+    {
+        if (getcwd(cwd, sizeof(cwd)) == NULL) {
+            printf("Could not get directory");
+        }   
+        printf("hw1shell-%s$ ", cwd);
         fgets(text, sizeof(text), stdin);
    
         text[strcspn(text, "\n")]= '\0';
@@ -32,7 +36,7 @@ int main()
         if (strcmp(user_cmd.args[0], "exit") == 0) 
         {
         // Guideline 2: exit command
-            handle_exit();
+            handle_exit(jobs);
             break;
         }
 
@@ -40,6 +44,7 @@ int main()
         {
             // Guideline 3: cd command
             handle_cd(user_cmd.args);
+
         }
 
         else if (strcmp(user_cmd.args[0], "jobs") == 0) 
@@ -50,8 +55,12 @@ int main()
 
         else 
         {
-        //Execute external commands
-        execute_external_command(&user_cmd, command_string_for_jobs, jobs);
+            //Execute external commands
+            execute_external_command(&user_cmd, command_string_for_jobs, jobs);
+            if (strcmp(user_cmd.args[0], "cat") == 0)
+            {
+                printf("\n");
+            }
         }
         reap_background_jobs(jobs);
     }

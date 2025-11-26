@@ -26,7 +26,7 @@ typedef struct Command{
 int split2words(char *words[], char *word_pointer);
 int parse_command(char *line, Command *cmd);
 void handle_cd(char **args) ;
-void handle_exit();
+void handle_exit(Job jobs[]);
 void execute_external_command(Command *user_cmd, char *command_string_for_jobs,Job jobs[]);
 void report_syscall_error(const char *syscall_name);
 void handle_jobs(Job jobs[]);
