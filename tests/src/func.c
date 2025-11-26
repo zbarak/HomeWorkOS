@@ -123,8 +123,19 @@ void handle_cd(char **args)
     // No output is required for a successful 'cd' operation.
 }
 
-void handle_exit()
+void handle_exit(Job jobs[])
 {
+    int status;
+
+    // Reap all background jobs before exiting
+    for (int i = 0; i < MAX_BG; i++) {
+        if (jobs[i].in_use) {
+            if (waitpid(jobs[i].pid, &status, 0) < 0) 
+                report_syscall_error("waitpid");
+            else
+                printf("hw1shell: pid %d finished\n", jobs[i].pid);
+        }
+    }
 }
 
 void handle_jobs(Job jobs[]) 
@@ -212,7 +223,8 @@ void execute_external_command(Command *user_cmd, char *command_string_for_jobs, 
     }
 }
 
-void reap_background_jobs(Job jobs[]){
+void reap_background_jobs(Job jobs[])
+{
     int status;
     //Go over every background job slot:
     for(int i = 0; i < MAX_BG; i++){
