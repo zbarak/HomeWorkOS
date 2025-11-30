@@ -1,2 +1,4 @@
 hw1shell
 .vscode
+*.tgz
+*.tar.gz
