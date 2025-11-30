@@ -6,13 +6,9 @@ int main()
     Command user_cmd;
     char command_string_for_jobs[TEXTSIZE];
     Job jobs[MAX_BG] = {0};
-    char cwd[1024]; // Buffer to store the current working directory
     while(1)
     {
-        if (getcwd(cwd, sizeof(cwd)) == NULL) {
-            printf("Could not get directory");
-        }   
-        printf("hw1shell-%s$ ", cwd);
+        printf("hw1shell$ ");
         fgets(text, sizeof(text), stdin);
    
         text[strcspn(text, "\n")]= '\0';
