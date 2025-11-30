@@ -65,15 +65,9 @@ int parse_command(char *line, Command *cmd)
     // 7. Handle the background flag ('&') (Guideline 5)
     char *last_token = cmd->args[cmd->count - 1];
 
-    if (strcmp(last_token, "&") == 0) {
+    if (last_token[strlen(last_token) - 1] == '&') {
+         last_token[strlen(last_token) - 1] = '\0';
         cmd->is_background = 1;
-
-        // The '&' token is removed from the argument list for exec()
-        // We set the pointer at that position to NULL.
-        cmd->args[cmd->count - 1] = NULL; 
-
-        // Decrease the count of actual command arguments passed to exec/cd logic
-        cmd->count--;
     }
 
 
