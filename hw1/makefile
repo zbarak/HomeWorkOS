@@ -9,3 +9,6 @@ all: $(SOURCE)
 run: $(SOURCE) 
 	@gcc $(FLAGS) $(SOURCE) -o $(TARGET)
 	@./$(TARGET)
+
+clean: $(SOURCE) 
+	@rm $(TARGET)
