@@ -1,246 +1,281 @@
 #include "../header/func.h"
+//Global Variables
+JobQueue g_job_queue;
+Stats g_stats;
 
-// A helper function to print errors according to Guideline 13.
-void report_syscall_error(const char *syscall_name) 
-{
-    // The format required: hw1shell: %s failed, errno is %d
-    fprintf(stderr, "hw1shell: %s failed, errno is %d\n", syscall_name, errno);
-}
+long long g_start_time_ms = 0;
+int g_jobs_in_progress = 0;
+pthread_mutex_t g_jobs_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  g_jobs_zero_cond = PTHREAD_COND_INITIALIZER;
 
+int g_dispacher_done = 0;
+int g_log_enabled = 0;
+int g_num_counters = 0;
+int g_num_threads = 0;
 
-int split2words(char *words[], char *word_pointer)
-{
-    int i = 0;
-    //word_pointer = line; // marks new line
-    while((*word_pointer == ' ') || (*word_pointer == '\t')){word_pointer++;} //skips space abd \t
-    while((*word_pointer != '\0') && (i < WORDSIZE)){
-        words[i] = word_pointer; //place word into array
-        while((*word_pointer != ' ') && (*word_pointer != '\t') && (*word_pointer != '\0')){word_pointer++;}
-        
-        if(*word_pointer == '\0') {i++; break;}
-        *word_pointer = '\0';
-        word_pointer++;
-        while((*word_pointer == ' ') || (*word_pointer == '\t')) word_pointer++;
-        i++;
+//To be added - array of pthread_t for worker threads (needed in shutdown_system)
+
+static pthreads_t *g_worker_threads = NULL; //To be malloc'd in init_system
+
+//Time Assitances
+
+long long now_ms(void){         // This function returns current time in milliseconds using CLOCK_MONOTONIC.
+    struct timespec ts;         //timespec is a special time variable used to store time specific things
+    if(clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        report_syscall_error("clock_gettime");                //Just in case of failure
+        return 0;
     }
-    //if (words[i] == NULL) i--;
-    //printf("%s\n", line);
-    return i;
+    return(long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; //convert seconds + nanoseconds to milliseconds.
 }
 
-// Parses a command line into a structured Command object.
-int parse_command(char *line, Command *cmd) 
-{
-    // We use a temporary array to hold the pointers from split2words, 
-    // ensuring we leave space for the final NULL for exec() if needed.
-    char *temp_args[WORDSIZE + 1]; 
-    int word_count;
+long long since_start_ms(void){     //This function simply returns the delta between the current time, and the start time in milliseconds.
+    if(g_start_time_ms == 0){           //Hasnt been initialized yet, so we return 0
+        return 0;                   
+    }
+    long long now = now_ms();
+    return now - g_start_time_ms;
+}
+
+void msleep_ms(int ms){             //This function pauses the program for 'ms' milliseconds
+    if(ms <= 0) return;     //'ms' value must be positive
+    usleep((useconds_t)ms * 1000);  //it uses the function 'usleep' which converts 'ms' into a special-
+                                    //unsinged integer in time types, and multiplies by 1000 because usleep must get nanoseconds
+}
+
+void report_syscall_error(const char *syscall_name){ //This function simply prints the syscall that failed and its error number.
+    fprintf(stderr, "hw2: %s failed, errno is %d\n", syscall_name, errno);
+}
+
+// ========== Initialization / cleanup ==========
+
+// Forward declaration for worker thread function (Zohar will implement later)
+static void *worker_thread_main(void *arg);
+
+// init_system()
+// Initialize global data structures, create counters and worker threads.
+// Returns 0 on success, -1 on error.
+int init_system(int num_threads, int num_counters, int log_enabled){
+    if(num_threads <= 0 || num_threads > MAX_THREADS || num_counters <= 0 || num_counters > MAX_COUNTERS){ //Making sure no value is incorrect
+        fprintf(stderr, "hw2: invalid num_threads or num_counters\n");
+        return -1;
+    }
+    //If all good, init global vars
+    g_num_threads = num_threads;
+    g_num_counters = num_counters;
+    g_log_enabled = log_enabled ? 1:0;
+    //init global start time
+    g_start_time_ms = now_ms();
+    //Init Job queue
+    g_job_queue.head = NULL;
+    g_job_queue.tail = NULL;
+    if(pthread_mutex_init(&g_job_queue.mutex, NULL) != 0){ //if mutex init failed - report
+        report_syscall_error("pthread_mutex_init");
+        return -1;
+    }
+    if(pthreads_cond_init(&g_job_queue.has_jobs, NULL) != 0){ //if cond init failed - report
+        report_syscall_error("pthreads_cond_init");
+        pthread_mutex_destroy(&g_job_queue.mutex);
+        return -1;
+    }
+    //Init stats:
+    g_stats.sum_turnaround_ms = 0;
+    g_stats.min_turnaround_ms = 0;  // (we'll handle "no jobs" case specially)
+    g_stats.max_turnaround_ms = 0;
+    g_stats.job_count         = 0;
+    if (pthread_mutex_init(&g_stats.mutex, NULL) != 0) { //if mutex init failed - report
+        report_syscall_error("pthread_mutex_init");
+        // destroy what we already initialized
+        pthread_cond_destroy(&g_job_queue.has_jobs);
+        pthread_mutex_destroy(&g_job_queue.mutex);
+        return -1;
+    }
+    g_jobs_in_progress = 0; //init counters
+    g_dispacher_done = 0;
     
-    // 1. Initialize the structure
-    memset(cmd, 0, sizeof(Command));
+    //TODO: create counter files here (we'll add this in a later step)
+    
+    //Allocate array for worker thread IDs:
+    g_worker_threads = malloc(sizeof(pthread_t) * g_num_threads);
+    if(!g_worker_threads) { //if malloc failed - report and destroy
+        report_syscall_error("malloc");
+        pthread_mutex_destroy(&g_stats.mutex);
+        pthread_cond_destroy(&g_job_queue.has_jobs);
+        pthread_mutex_destroy(&g_job_queue.mutex);
+        return -1;
+    }
+    for(int i = 0; i < g_num_threads; i++){
+        int rc = pthread_create(&g_worker_threads[i], NULL, worker_thread_main, (void *)(long)i);
+        /* 
+        Short explanation for what the above line does:
+        &g_worker_threads[i] — where the created thread ID will be stored
 
-    // 2. Tokenize the line using the user-provided function
-    word_count = split2words(temp_args, line);
+        NULL — default thread attributes (No need to change)
 
-    // 3. Handle tokenization errors (too many parameters, Guideline 14)
-    if (word_count > WORDSIZE) {
-        fprintf(stderr, "hw1shell: command has too many parameters (max %d)\n", WORDSIZE);
+        worker_thread_main — the function the new thread will run, will be updated later per thread (according to what it needs to do)
+
+        (void *)(long)i — pass the thread index i to the thread as a void * argument
+        (trick to pass an integer)
+
+        pthread_create returns 0 on success, non-zero error code on failure.
+        */
+        if(rc != 0) { //if the thread creation failed - report
+            errno = rc;
+            report_syscall_error("pthreads_create");
+            return -1;
+        }
+    }
+    return 0;
+}
+// shutdown_system()
+// Joins worker threads, destroys mutexes/conds, frees memory.
+void shutdown_system(void){
+    // Join workers
+    if(g_worker_threads){
+        for(int i = 0; i < g_num_threads; i++){
+            pthreads_join(g_worker_threads[i], NULL); //This waits for worker thread i to finish
+                                                      //and NULL means we dont care for its return value (This avoids zombie threads)
+        }
+        free(g_worker_threads); //frees the threads memory
+        g_worker_threads = NULL;//makes sure it no longer accidentally has a value
+    }
+    // Destroy stats mutex
+    pthread_mutex_destroy(&g_stats.mutex);
+
+    // Destroy queue mutex/cond
+    pthread_cond_destroy(&g_job_queue.has_jobs);
+    pthread_mutex_destroy(&g_job_queue.mutex);
+
+    // Destroy jobs mutex/cond
+    pthread_cond_destroy(&g_jobs_zero_cond);
+    pthread_mutex_destroy(&g_jobs_mutex);
+}
+
+// enqueue_job()
+// Create a new Job object from a line and enqueue it.
+int enqueue_job(const char *line, long long read_time_ms){
+    Job *job = malloc(sizeof(Job)); //allocate memory for Job
+    if(!job){   //if malloc failed - report
+        report_syscall_error("malloc");
+        return -1;
+    }
+    job->line = strdup(line); //strdup(line) creates a new heap-allocated copy of the string line.
+                              //It returns a pointer to that newly allocated string.
+    if(!job->line){
+        report_syscall_error("strup"); //if strdup failed - report and free memory
+        free(job);
+        return -1;
+    }        
+    job->read_time_ms = read_time_ms;
+    job->next = NULL;
+
+    //Update queue:
+    if(pthread_mutex_lock(&g_job_queue.mutex) != 0) { //locks the queue mutex so others threads cant access it
+        report_syscall_error("pthreads_mutex_lock"); //if locking failed - report and free.
+        free(job->line);
+        free(job);
+        return -1;
+    }
+    //we now add the next job to queue 
+    if (g_job_queue.tail == NULL) { //if the queue is empty add this job only
+        g_job_queue.head = job;
+        g_job_queue.tail = job;
+    } 
+    else {
+        g_job_queue.tail->next = job; //otherwise add it to the tail
+        g_job_queue.tail = job;
+    }
+    pthread_mutex_unlock(&g_job_queue.mutex); //we finished updating the queue, unlock it for other threads use.
+    // Update jobs_in_progress
+    if (pthread_mutex_lock(&g_jobs_mutex) != 0) {
+        report_syscall_error("pthread_mutex_lock");
+        // We won't undo enqueue here; homework-level OK.
+        return -1;
+    }
+    g_jobs_in_progress++;
+    pthread_mutex_unlock(&g_jobs_mutex);
+
+    // Wake one worker
+    pthread_cond_signal(&g_job_queue.has_jobs);
+
+    return 0;
+}
+
+
+// dispatcher_wait_for_all_jobs()
+// Block until g_jobs_in_progress becomes 0.
+void dispatcher_wait_for_all_jobs(void)
+{
+    if (pthread_mutex_lock(&g_jobs_mutex) != 0) {
+        report_syscall_error("pthread_mutex_lock");
+        return;
+    }
+
+    while (g_jobs_in_progress > 0) {
+        int rc = pthread_cond_wait(&g_jobs_zero_cond, &g_jobs_mutex);
+        if (rc != 0) {
+            errno = rc;
+            report_syscall_error("pthread_cond_wait");
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&g_jobs_mutex);
+}
+
+
+// write_stats_file()
+// Writes stats to the given filename.
+// NOTE: workers still need to update g_stats for this to be meaningful.
+int write_stats_file(const char *filename)
+{
+    FILE *f = fopen(filename, "w");
+    if (!f) {
+        report_syscall_error("fopen");
         return -1;
     }
 
-    // 4. Set the command count
-    cmd->count = word_count;
+    long long total_run_ms = now_ms() - g_start_time_ms;
 
-    // 5. Check if the line was just empty or contained only whitespace
-    if (cmd->count == 0) {
-        return 0;
-    }
-    
-    // 6. Copy tokens to the final Command structure args array and handle background flag
-    int i;
-    for (i = 0; i < cmd->count; i++) {
-        cmd->args[i] = temp_args[i];
-    }
-    
-    // 7. Handle the background flag ('&') (Guideline 5)
-    char *last_token = cmd->args[cmd->count - 1];
-
-    if (last_token[strlen(last_token) - 1] == '&') {
-         last_token[strlen(last_token) - 1] = '\0';
-        cmd->is_background = 1;
+    // Copy stats under lock
+    long long sum_ms, min_ms, max_ms, count;
+    if (pthread_mutex_lock(&g_stats.mutex) != 0) {
+        report_syscall_error("pthread_mutex_lock");
+        fclose(f);
+        return -1;
     }
 
+    sum_ms  = g_stats.sum_turnaround_ms;
+    min_ms  = g_stats.min_turnaround_ms;
+    max_ms  = g_stats.max_turnaround_ms;
+    count   = g_stats.job_count;
 
-    // 8. Finalize the argument list for exec() (Crucial requirement)
-    // The exec family of functions requires the last element of the argument list to be NULL.
-    // This handles both cases: 
-    // a) If '&' was present, the slot cmd->count-1 is already NULL from step 7.
-    // b) If '&' was NOT present, the slot cmd->count needs to be NULL-terminated.
-    cmd->args[cmd->count] = NULL;
+    pthread_mutex_unlock(&g_stats.mutex);
 
-    return 0; // Success
+    double avg = 0.0;
+    if (count > 0) {
+        avg = (double)sum_ms / (double)count;
+    }
+
+    fprintf(f, "total running time: %lld milliseconds\n", total_run_ms);
+    fprintf(f, "sum of jobs turnaround time: %lld milliseconds\n", sum_ms);
+    fprintf(f, "min job turnaround time: %lld milliseconds\n", (count > 0 ? min_ms : 0));
+    fprintf(f, "average job turnaround time: %f milliseconds\n", avg);
+    fprintf(f, "max job turnaround time: %lld milliseconds\n", (count > 0 ? max_ms : 0));
+
+    fclose(f);
+    return 0;
 }
 
-// Implements the 'cd' (change directory) built-in command.
-void handle_cd(char **args) 
+
+// Temporary stub worker function (Person B will replace this)
+static void *worker_thread_main(void *arg)
 {
-    // 1. Check for the valid number of arguments (Guideline 3)
-    // A valid cd command must have exactly two tokens: "cd" and "<directory>".
-    // So, args[0] is "cd", args[1] is the target directory, and args[2] must be NULL.
+    int thread_index = (int)(long)arg;
+    (void)thread_index; // silence unused warning for now
 
-    // Check if the target directory (args[1]) exists AND if there are no extra arguments (args[2] is NULL).
-    if (args[1] == NULL || args[2] != NULL) {
-        // This covers cases like:
-        // - "cd" (args[1] is NULL)
-        // - "cd dir1 dir2" (args[2] is not NULL)
-
-        // Error message required by Guideline 3
-        fprintf(stderr, "hw1shell: invalid command\n");
-        return;
-    }
-
-    // 2. Execute the directory change
-    const char *target_dir = args[1];
-
-    if (chdir(target_dir) == -1) {
-        // chdir failed. This happens if the directory doesn't exist,
-        // or the user doesn't have permission, etc.
-
-        // Per Guideline 13: Report the system call failure
-        report_syscall_error("chdir");
-
-        // A failed chdir() due to a non-existent directory is essentially an invalid/unexecutable command.
-        fprintf(stderr, "hw1shell: invalid command\n");
-    }
-
-    // If chdir is successful, it changes the working directory, and the function simply returns.
-    // No output is required for a successful 'cd' operation.
+    // For now, worker just exits immediately.
+    // Zohar will implement: dequeue jobs, log start/end, update stats, etc.
+    return NULL;
 }
 
-void handle_exit(Job jobs[])
-{
-    int status;
 
-    // Reap all background jobs before exiting
-    for (int i = 0; i < MAX_BG; i++) {
-        if (jobs[i].in_use) {
-            if (waitpid(jobs[i].pid, &status, 0) < 0) 
-                report_syscall_error("waitpid");
-            else
-                printf("hw1shell: pid %d finished\n", jobs[i].pid);
-        }
-    }
-}
-
-void handle_jobs(Job jobs[]) 
-{
-    for(int i = 0; i < MAX_BG; i++){
-        if(jobs[i].in_use){
-            printf("%d\t%s\n", jobs[i].pid, jobs[i].command);
-        }
-    }
-}
-
-void execute_external_command(Command *user_cmd, char *command_string_for_jobs, Job jobs[])
-{
-    if((user_cmd->count == 0) || (user_cmd->args[0] == NULL)) //Make sure there is actual proper command to execute
-        return;
-
-    int is_bg = user_cmd->is_background;
-    if(is_bg){                              //Check if the command is background, and then check if we have free space for it (MAX = 4)
-        int running_bg = 0;
-        for(int i = 0; i < MAX_BG; i++){
-            if(jobs[i].in_use){
-                running_bg++;
-            }
-        }
-    
-
-    if(running_bg >= MAX_BG){ //Too many background jobs
-        fprintf(stderr, "hw1shell: too many background commands running\n");
-        return;
-        }
-    }
-    pid_t pid = fork();  //create a new process to actually perform the external command on the child process.
-
-    if(pid < 0){
-        report_syscall_error("fork"); //fork() failed: no child was created, report the issue(?)
-        fprintf(stderr, "hw1shell: invalid command\n"); //print the errno code?
-        return;
-    }
-
-    if(pid == 0){
-        //=============================
-        //  This is the child process
-        //=============================
-        execvp(user_cmd->args[0], user_cmd->args); //if all went good we never return
-        report_syscall_error("execvp");             //if we did continue, that means execvp failed
-        fprintf(stderr, "hw1shell: invalid command\n");//So we report it and exit <----------------------------- FIX REPORTING LATER
-        exit(1);
-    }
-
-    else {
-        //=============================
-        //  This is the parent process
-        //=============================
-        
-        if(is_bg){                  //Find a free spot in jobs[], as this is a background command
-            int slot = -1;
-            for(int i = 0; i< MAX_BG; i++){
-                if(!jobs[i].in_use){
-                    slot = i;
-                    break;
-                }
-            }
-        
-            if(slot == -1){ //We already checked but just to make sure
-                fprintf(stderr, "hw1shell: too many background commands running\n");
-                return;
-            }
-
-            jobs[slot].pid = pid;
-            jobs[slot].in_use = 1;
-            //Store the original command line (with &)
-            strncpy(jobs[slot].command, command_string_for_jobs, TEXTSIZE - 1);
-            jobs[slot].command[TEXTSIZE - 1] = '\0';
-
-            printf("hw1shell: pid %d started\n", pid);
-        }
-        else {
-        int status;
-        if(waitpid(pid, &status, 0) < 0) { //If all worked we return with value > 0
-            // we returned, waitpid failed
-            report_syscall_error("waitpid");
-            fprintf(stderr, "hw1shell: invalid command\n");
-            }
-        }
-    }
-}
-
-void reap_background_jobs(Job jobs[])
-{
-    int status;
-    //Go over every background job slot:
-    for(int i = 0; i < MAX_BG; i++){
-        if(jobs[i].in_use){
-            pid_t ret = waitpid(jobs[i].pid, &status, WNOHANG); //Check if this child process is finished without blocking it
-            if (ret > 0){
-                printf("hw1shell: pid %d finished\n", jobs[i].pid); //Print which child with which pid has finished.
-                //free up its slot
-                jobs[i].in_use = 0;
-                jobs[i].pid = 0;
-                jobs[i].command[0] = '\0';
-            }
-            else if (ret < 0) {
-                //Error while checking this child
-                report_syscall_error("waitpid");
-                fprintf(stderr, "hw1shell: invalid command\n");
-                //Also free the slots
-                jobs[i].in_use = 0;
-                jobs[i].pid = 0;
-                jobs[i].command[0] = '\0';
-            }
-            //ret == 0 -> child is still running, do nothing
-        }
-    }
-}
