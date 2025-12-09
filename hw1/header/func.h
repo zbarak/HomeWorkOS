@@ -65,7 +65,6 @@ long long now_ms(void);
 long long since_start_ms(void);
 
 /* ---------- Utility ---------- */
-
 // Sleep for the given number of milliseconds (no busy waiting)
 void msleep_ms(int ms);
 
