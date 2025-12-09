@@ -8,14 +8,14 @@ int g_jobs_in_progress = 0;
 pthread_mutex_t g_jobs_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  g_jobs_zero_cond = PTHREAD_COND_INITIALIZER;
 
-int g_dispacher_done = 0;
+int g_dispatcher_done = 0;
 int g_log_enabled = 0;
 int g_num_counters = 0;
 int g_num_threads = 0;
 
 //To be added - array of pthread_t for worker threads (needed in shutdown_system)
 
-static pthreads_t *g_worker_threads = NULL; //To be malloc'd in init_system
+pthread_t *g_worker_threads = NULL; //To be malloc'd in init_system
 
 //Time Assitances
 
@@ -48,8 +48,269 @@ void report_syscall_error(const char *syscall_name){ //This function simply prin
 
 // ========== Initialization / cleanup ==========
 
-// Forward declaration for worker thread function (Zohar will implement later)
-static void *worker_thread_main(void *arg);
+
+// =========================================================
+//  WORKER THREAD MAIN
+// =========================================================
+static void *worker_thread_main(void *arg)
+{
+    int thread_index = (int)(long)arg;
+
+    // ---------------------------------------
+    // 1. Open thread log file (if enabled)
+    // ---------------------------------------
+    FILE *logf = NULL;
+    char filename[32];
+
+    if (g_log_enabled) {
+        sprintf(filename, "thread%02d.txt", thread_index);
+
+        logf = fopen(filename, "w");
+        if (!logf) {
+            report_syscall_error("fopen");
+            // worker continues, but without logging
+        }
+    }
+
+    // ---------------------------------------
+    // 2. Worker main loop
+    // ---------------------------------------
+    while (1) {
+
+        // ========== (A) DEQUEUE A JOB ==========
+        if (pthread_mutex_lock(&g_job_queue.mutex) != 0) {
+            report_syscall_error("pthread_mutex_lock");
+            return NULL;
+        }
+
+        // Wait while queue empty *and* dispatcher not done
+        while (g_job_queue.head == NULL && g_dispatcher_done == 0) {
+            int rc = pthread_cond_wait(&g_job_queue.has_jobs, &g_job_queue.mutex);
+            if (rc != 0) {
+                errno = rc;
+                report_syscall_error("pthread_cond_wait");
+                pthread_mutex_unlock(&g_job_queue.mutex);
+                return NULL;
+            }
+        }
+
+        // If dispatcher done and queue empty -> exit
+        if (g_job_queue.head == NULL && g_dispatcher_done == 1) {
+            pthread_mutex_unlock(&g_job_queue.mutex);
+            break; // exit the worker thread
+        }
+
+        // Pop job from queue
+        Job *job = g_job_queue.head;
+        g_job_queue.head = job->next;
+        if (g_job_queue.head == NULL)
+            g_job_queue.tail = NULL;
+
+        pthread_mutex_unlock(&g_job_queue.mutex);
+        // ========== Job dequeued ==========
+
+        // ---------------------------------------
+        // 3. Log job START
+        // ---------------------------------------
+        long long start_time_ms = since_start_ms();
+
+        if (logf) {
+            fprintf(logf,
+                    "TIME %lld: START job %s\n",
+                    start_time_ms,
+                    job->line);
+            fflush(logf);
+        }
+
+        // ---------------------------------------
+        // 4. PARSE the job line into basic commands
+        // ---------------------------------------
+        // Commands separated by ";"
+        char *to_free_line = strdup(job->line);
+        char *line_copy = to_free_line;
+        if (!line_copy) {
+            report_syscall_error("strdup");
+            // still finish job (just no commands)
+        }
+
+        char *basic_cmds[128];
+        int basic_count = 0;
+
+        if (line_copy) {
+            char *token = strtok(line_copy, ";");
+
+            while (token && basic_count < 128) {
+                // Trim spaces
+                while (*token == ' ') token++;
+
+                basic_cmds[basic_count++] = token;
+                token = strtok(NULL, ";");
+            }
+        }
+
+        // ---------------------------------------
+        // 5. Check for "repeat x"
+        // ---------------------------------------
+        int repeat_count = 1;
+        int first_cmd = 0;
+
+        if (basic_count > 0) {
+            if (strncmp(basic_cmds[0], "worker", 6) == 0) {
+                first_cmd = 1; 
+            }
+        }
+        if (first_cmd < basic_count && strncmp(basic_cmds[first_cmd], "repeat", 6) == 0) {
+
+            char *p = basic_cmds[first_cmd] + 6;
+            while (*p == ' ') p++;
+            repeat_count = atoi(p);
+
+            first_cmd++; // skip the repeat command
+        }
+
+        // ---------------------------------------
+        // 6. Execute commands repeat_count times
+        // ---------------------------------------
+        for (int r = 0; r < repeat_count; r++) {
+            for (int i = first_cmd; i < basic_count; i++) {
+
+                char *cmd = basic_cmds[i];
+
+                // Trim spaces again (safe)
+                while (*cmd == ' ') cmd++;
+
+                // ========== msleep x ==========
+                if (strncmp(cmd, "msleep", 6) == 0) {
+                    long long ms = atoll(cmd + 6);
+                    msleep_ms((int)ms);
+                }
+
+                // ========== increment x ==========
+                else if (strncmp(cmd, "increment", 9) == 0) {
+
+                    int cid = atoi(cmd + 9);
+                    if (cid >= 0 && cid < g_num_counters) {
+                        char cfname[32];
+                        sprintf(cfname, "count%02d.txt", cid);
+
+                        FILE *cf = fopen(cfname, "r+");
+                        if (cf) {
+                            long long value = 0;
+                            fscanf(cf, "%lld", &value);
+
+                            value++;
+
+                            fseek(cf, 0, SEEK_SET);
+                            fprintf(cf, "%lld\n", value);
+                            fflush(cf);
+                            fclose(cf);
+                        }
+                        else {
+                            report_syscall_error("fopen");
+                        }
+                    }
+                }
+
+                // ========== decrement x ==========
+                else if (strncmp(cmd, "decrement", 9) == 0) {
+
+                    int cid = atoi(cmd + 9);
+                    if (cid >= 0 && cid < g_num_counters) {
+                        char cfname[32];
+                        sprintf(cfname, "count%02d.txt", cid);
+
+                        FILE *cf = fopen(cfname, "r+");
+                        if (cf) {
+                            long long value = 0;
+                            fscanf(cf, "%lld", &value);
+
+                            value--;
+
+                            fseek(cf, 0, SEEK_SET);
+                            fprintf(cf, "%lld\n", value);
+                            fflush(cf);
+                            fclose(cf);
+                        }
+                        else {
+                            report_syscall_error("fopen");
+                        }
+                    }
+                }
+
+                // ========== Unknown command ==========
+                else {
+                    fprintf(stderr, "hw2: invalid worker command in job: %s\n", cmd);
+                }
+            }
+        }
+
+        // Free duplicated line copy
+        if (to_free_line) free(to_free_line);
+
+        // ---------------------------------------
+        // 7. Log END of job
+        // ---------------------------------------
+        long long end_time_ms = since_start_ms();
+
+        if (logf) {
+            fprintf(logf,
+                    "TIME %lld: END job %s\n",
+                    end_time_ms,
+                    job->line);
+            fflush(logf);
+        }
+
+        // ---------------------------------------
+        // 8. Update turnaround-time stats
+        // ---------------------------------------
+        long long turnaround = end_time_ms - job->read_time_ms;
+
+        if (pthread_mutex_lock(&g_stats.mutex) == 0) {
+
+            g_stats.sum_turnaround_ms += turnaround;
+
+            if (g_stats.job_count == 0) {
+                g_stats.min_turnaround_ms = turnaround;
+                g_stats.max_turnaround_ms = turnaround;
+            } else {
+                if (turnaround < g_stats.min_turnaround_ms)
+                    g_stats.min_turnaround_ms = turnaround;
+                if (turnaround > g_stats.max_turnaround_ms)
+                    g_stats.max_turnaround_ms = turnaround;
+            }
+
+            g_stats.job_count++;
+
+            pthread_mutex_unlock(&g_stats.mutex);
+        }
+
+        // ---------------------------------------
+        // 9. Decrease jobs_in_progress
+        // ---------------------------------------
+        if (pthread_mutex_lock(&g_jobs_mutex) == 0) {
+
+            g_jobs_in_progress--;
+
+            if (g_jobs_in_progress == 0) {
+                pthread_cond_signal(&g_jobs_zero_cond);
+            }
+
+            pthread_mutex_unlock(&g_jobs_mutex);
+        }
+
+        // ---------------------------------------
+        // 10. Free job memory
+        // ---------------------------------------
+        free(job->line);
+        free(job);
+    }
+
+    // ---------------------------------------
+    // 11. Thread exit
+    // ---------------------------------------
+    if (logf) fclose(logf);
+    return NULL;
+}
 
 // init_system()
 // Initialize global data structures, create counters and worker threads.
@@ -72,8 +333,8 @@ int init_system(int num_threads, int num_counters, int log_enabled){
         report_syscall_error("pthread_mutex_init");
         return -1;
     }
-    if(pthreads_cond_init(&g_job_queue.has_jobs, NULL) != 0){ //if cond init failed - report
-        report_syscall_error("pthreads_cond_init");
+    if(pthread_cond_init(&g_job_queue.has_jobs, NULL) != 0){ //if cond init failed - report
+        report_syscall_error("pthread_cond_init");
         pthread_mutex_destroy(&g_job_queue.mutex);
         return -1;
     }
@@ -90,10 +351,19 @@ int init_system(int num_threads, int num_counters, int log_enabled){
         return -1;
     }
     g_jobs_in_progress = 0; //init counters
-    g_dispacher_done = 0;
+    g_dispatcher_done = 0;
     
     //TODO: create counter files here (we'll add this in a later step)
-    
+    for (int i = 0; i < g_num_counters; i++) 
+    {
+        char fname[32];
+        sprintf(fname, "count%02d.txt", i);
+        FILE *f = fopen(fname, "w");
+        if (!f) { report_syscall_error("fopen"); return -1; }
+        fprintf(f, "0\n");
+        fclose(f);
+    }
+
     //Allocate array for worker thread IDs:
     g_worker_threads = malloc(sizeof(pthread_t) * g_num_threads);
     if(!g_worker_threads) { //if malloc failed - report and destroy
@@ -120,7 +390,7 @@ int init_system(int num_threads, int num_counters, int log_enabled){
         */
         if(rc != 0) { //if the thread creation failed - report
             errno = rc;
-            report_syscall_error("pthreads_create");
+            report_syscall_error("pthread_create");
             return -1;
         }
     }
@@ -132,7 +402,7 @@ void shutdown_system(void){
     // Join workers
     if(g_worker_threads){
         for(int i = 0; i < g_num_threads; i++){
-            pthreads_join(g_worker_threads[i], NULL); //This waits for worker thread i to finish
+            pthread_join(g_worker_threads[i], NULL); //This waits for worker thread i to finish
                                                       //and NULL means we dont care for its return value (This avoids zombie threads)
         }
         free(g_worker_threads); //frees the threads memory
@@ -161,7 +431,7 @@ int enqueue_job(const char *line, long long read_time_ms){
     job->line = strdup(line); //strdup(line) creates a new heap-allocated copy of the string line.
                               //It returns a pointer to that newly allocated string.
     if(!job->line){
-        report_syscall_error("strup"); //if strdup failed - report and free memory
+        report_syscall_error("strdup"); //if strdup failed - report and free memory
         free(job);
         return -1;
     }        
@@ -170,7 +440,7 @@ int enqueue_job(const char *line, long long read_time_ms){
 
     //Update queue:
     if(pthread_mutex_lock(&g_job_queue.mutex) != 0) { //locks the queue mutex so others threads cant access it
-        report_syscall_error("pthreads_mutex_lock"); //if locking failed - report and free.
+        report_syscall_error("pthread_mutex_lock"); //if locking failed - report and free.
         free(job->line);
         free(job);
         return -1;
@@ -264,18 +534,6 @@ int write_stats_file(const char *filename)
 
     fclose(f);
     return 0;
-}
-
-
-// Temporary stub worker function (Person B will replace this)
-static void *worker_thread_main(void *arg)
-{
-    int thread_index = (int)(long)arg;
-    (void)thread_index; // silence unused warning for now
-
-    // For now, worker just exits immediately.
-    // Zohar will implement: dequeue jobs, log start/end, update stats, etc.
-    return NULL;
 }
 
 
