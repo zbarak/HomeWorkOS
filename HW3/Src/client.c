@@ -1,4 +1,27 @@
-#include "../Header/client.h"
+//===================================================
+//client.c
+#include "client.h"
+static int send_all(int fd, const char *buf, size_t len){ // Sends exactly `len` bytes from `buf` over socket `fd`.
+                                                          // Returns 0 on success (all bytes sent), -1 on error.
+    size_t sent = 0;
+    while(sent < len){                                    //loops on all Bytes
+        ssize_t n = send(fd, buf + sent, len - sent, 0);
+    
+    if (n < 0) {                                          //if send() returns an error
+            if (errno == EINTR) continue;                 //EINTR means the send was interrupted by a signal
+                                                          //This is NOT a real error — we should just retry
+            return -1;                                    //Any other error must be stopped.
+        }
+    sent += (size_t)n;                                    //update sent to next bytes.
+    }
+return 0;
+}
+
+static int connect_to_server(const char *addr, const char *port){
+    struct addrinfo hints, *res = NULL, *p = NULL;
+    memset()
+}
+
 
 int main(int argc, char *argv[]) {
     // 1. Validate command line syntax: hw3client addr port name [cite: 11]
@@ -31,3 +54,4 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+//===================================================

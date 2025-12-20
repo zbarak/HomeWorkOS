@@ -1,3 +1,4 @@
+#makefile:
 # 1. Variables - Match your folder names exactly (Case Sensitive!)
 CC = gcc
 CFLAGS = -Wall -Wextra -IHeader
