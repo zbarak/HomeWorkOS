@@ -12,8 +12,8 @@
 
 JobQueue g_job_queue;
 Stats    g_stats;
+extern pthread_mutex_t g_counter_mutex[MAX_COUNTERS];
 
-static pthread_mutex_t g_counter_mutex[MAX_COUNTERS]; // one mutex per counter file
 
 long long g_start_time_ms = 0;
 
