@@ -4,6 +4,8 @@
 
 #include "../header/func.h"
 
+pthread_mutex_t g_counter_mutex[MAX_COUNTERS]; // one mutex per counter file
+
 int main(int argc, char *argv[])
 {
     // -----------------------------
@@ -95,22 +97,18 @@ int main(int argc, char *argv[])
             tmp[MAX_LINE - 1] = '\0';
 
             char *saveptr = NULL;
-            char *tok0 = strtok_r(tmp, " \t", &saveptr); // "dispatcher"
-            char *tok1 = strtok_r(NULL, " \t", &saveptr); // "msleep" or "wait"
-            char *tok2 = strtok_r(NULL, " \t", &saveptr); // X for msleep
+            char *tok0 = strtok_r(tmp, " \t", &saveptr); // "dispatcher_msleep" / "dispatcher_wait"
+            char *tok1 = strtok_r(NULL, " \t", &saveptr); // The parameter
 
-            if (!tok1) {
-                fprintf(stderr, "hw2: invalid dispatcher command\n");
-            }
-            else if (strcmp(tok1, "msleep") == 0) {
-                if (!tok2) {
+            if (strcmp(tok0, "dispatcher_msleep") == 0) {
+                if (!tok1) {
                     fprintf(stderr, "hw2: invalid dispatcher msleep command\n");
                 } else {
-                    int ms = atoi(tok2);
+                    int ms = atoi(tok1);
                     msleep_ms(ms);
                 }
             }
-            else if (strcmp(tok1, "wait") == 0) {
+            else if (strcmp(tok0, "dispatcher_wait") == 0) {
                 dispatcher_wait_for_all_jobs();
             }
             else {

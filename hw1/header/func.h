@@ -69,7 +69,7 @@ extern int g_num_threads;
    We also must declare the counter mutex array here,
    because func.c defines it AND worker_thread_main() uses it.
 */
-extern pthread_mutex_t g_counter_mutex[MAX_COUNTERS];
+
 
 /* --------------------------------------------------------------------------
    Time helpers
