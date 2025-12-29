@@ -15,12 +15,14 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 
-#define MAX_CLIENTS 10
-#define BUFFER_SIZE 1024
+#define MAX_CLIENTS 16
+#define MAX_NAME_LEN 256
+#define MAX_MSG_LEN 256
+#define BUFFER_SIZE 2048
 
 typedef struct {
     int socket;
-    char name[50];
+    char name[MAX_NAME_LEN];
     char ip[INET_ADDRSTRLEN];
 } Client;   
 
