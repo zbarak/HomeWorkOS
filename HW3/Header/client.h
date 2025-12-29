@@ -15,7 +15,7 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 2048
 
 #endif
 

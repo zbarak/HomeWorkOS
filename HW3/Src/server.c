@@ -236,6 +236,8 @@ int main(int argc, char *argv[]) {
                         if (idx != -1) {
                             send_all(clients[idx].socket,
                                      out, strlen(out));
+                        } else {
+                            printf("User '%s' not found.\n", target);
                         }
                     }
                 }
